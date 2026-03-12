@@ -31,7 +31,7 @@ def back_kb(target="start"):
 # ─────────────────────────────────────────
 #  📥 QUALITY SELECTION
 # ─────────────────────────────────────────
-def quality_kb(formats, url_hash):
+def quality_kb(formats, url_hash, source_url=None):
     buttons = []
 
     if formats:
@@ -67,7 +67,7 @@ def quality_kb(formats, url_hash):
     ])
     buttons.append([
         InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
-        InlineKeyboardButton("🔗 Open URL", url=f"https://t.me/share/url?url=."),
+        InlineKeyboardButton("🔗 Open URL", url=source_url or SUPPORT_LINK),
     ])
     return InlineKeyboardMarkup(buttons)
 

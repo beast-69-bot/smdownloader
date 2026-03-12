@@ -16,7 +16,7 @@ from datetime import datetime
 
 from telegram import (
     Update, BotCommand, InlineQueryResultArticle,
-    InputTextMessageContent, InlineQueryResultVideo
+    InputTextMessageContent
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -45,12 +45,11 @@ from keyboards import (
 from messages import (
     START_MSG, HELP_MSG, STATS_MSG, ABOUT_MSG, SITES_MSG,
     VIDEO_INFO_MSG, DOWNLOAD_DONE_MSG, MAINTENANCE_MSG,
-    FORCE_SUB_MSG, ADMIN_STATS_MSG
+    FORCE_SUB_MSG, ADMIN_STATS_MSG, BOT_INACTIVE_MSG
 )
 from cache import (
     store_url, get_url, clear_cache, set_user_state, get_user_state,
-    clear_user_state, check_cooldown, set_cooldown,
-    set_pending_broadcast, get_pending_broadcast, clear_pending_broadcast
+    clear_user_state, check_cooldown, set_cooldown
 )
 
 logging.basicConfig(
@@ -95,6 +94,12 @@ async def middleware_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🚫 **Tumhara account ban hai!**\n\nReason: {reason or 'N/A'}\n\nSupport: {config.SUPPORT_LINK}",
                 parse_mode=ParseMode.MARKDOWN
             )
+        return False
+
+    if get_setting("bot_active") != "1" and user.id not in config.ADMIN_IDS:
+        msg = update.message or (update.callback_query.message if update.callback_query else None)
+        if msg:
+            await msg.reply_text(BOT_INACTIVE_MSG, parse_mode=ParseMode.MARKDOWN)
         return False
 
     if get_setting("maintenance") == "1" and user.id not in config.ADMIN_IDS:
@@ -156,6 +161,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #   /help
 # ══════════════════════════════════════════
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await middleware_check(update, context):
+        return
     await update.message.reply_text(HELP_MSG, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb("start"))
 
 # ══════════════════════════════════════════
@@ -177,12 +184,16 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #   /about
 # ══════════════════════════════════════════
 async def cmd_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await middleware_check(update, context):
+        return
     await update.message.reply_text(ABOUT_MSG, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb("start"))
 
 # ══════════════════════════════════════════
 #   /ping
 # ══════════════════════════════════════════
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await middleware_check(update, context):
+        return
     start_time = time.time()
     msg = await update.message.reply_text("🏓 Pinging...")
     latency = (time.time() - start_time) * 1000
@@ -204,6 +215,8 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #   /cancel
 # ══════════════════════════════════════════
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await middleware_check(update, context):
+        return
     clear_user_state(update.effective_user.id)
     await update.message.reply_text("❌ Cancelled.", parse_mode=ParseMode.MARKDOWN)
 
@@ -211,6 +224,8 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #   /myid
 # ══════════════════════════════════════════
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await middleware_check(update, context):
+        return
     user = update.effective_user
     await update.message.reply_text(
         f"🆔 **Your Info**\n\n"
@@ -390,6 +405,10 @@ async def cmd_search_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not results:
         await update.message.reply_text("❌ User not found!")
         return
+    await update.message.reply_text(format_user_search_results(results), parse_mode=ParseMode.MARKDOWN)
+
+
+def format_user_search_results(results):
     msg = ""
     for u in results[:5]:
         msg += (
@@ -400,7 +419,7 @@ async def cmd_search_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🚫 Banned: {'Yes' if u['is_banned'] else 'No'}\n"
             f"📅 Joined: {str(u['joined_at'])[:10]}\n\n"
         )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    return msg.rstrip()
 
 # ══════════════════════════════════════════
 #   MAIN URL HANDLER
@@ -463,6 +482,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     await update.message.reply_text(f"❌ Failed: {e}")
             return
+        elif s == "waiting_search_admin" and user.id in config.ADMIN_IDS:
+            clear_user_state(user.id)
+            results = search_user(text)
+            if not results:
+                await update.message.reply_text("❌ User not found!")
+                return
+            await update.message.reply_text(
+                format_user_search_results(results),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
 
     if not is_url(text):
         await update.message.reply_text(
@@ -517,7 +547,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     url_hash = store_url(text, info, formats)
-    kb = quality_kb(formats, url_hash)
+    kb = quality_kb(formats, url_hash, text)
 
     title      = (info or {}).get("title", "Video") or "Video"
     uploader   = (info or {}).get("uploader", "Unknown") or "Unknown"
@@ -552,6 +582,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    if not await middleware_check(update, context):
+        return
     data = q.data
     user = update.effective_user
 
@@ -698,6 +730,8 @@ async def handle_admin_callback(q, data, user, context):
         set_setting("bot_active", new)
         status = "✅ Active" if new == "1" else "❌ Inactive"
         await q.answer(f"Bot: {status}", show_alert=True)
+        stats = get_stats()
+        await q.message.edit_text(ADMIN_STATS_MSG(stats), parse_mode=ParseMode.MARKDOWN, reply_markup=admin_main_kb())
         return
 
     if action == "clearcache":
@@ -762,6 +796,18 @@ async def handle_admin_callback(q, data, user, context):
     if action == "search":
         set_user_state(user.id, "waiting_search_admin")
         await q.message.edit_text("🔍 **User Search**\nUser ID ya username bhejo:", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if action == "pin":
+        try:
+            await context.bot.pin_chat_message(
+                chat_id=q.message.chat_id,
+                message_id=q.message.message_id,
+                disable_notification=True
+            )
+            await q.answer("📌 Message pinned!", show_alert=True)
+        except Exception as e:
+            await q.answer(f"❌ Pin failed: {str(e)[:60]}", show_alert=True)
         return
 
     if action == "botlink":

@@ -160,6 +160,13 @@ Thodi der baad wapas try karo! 🙏
 Updates ke liye channel join karo.
 """
 
+BOT_INACTIVE_MSG = """
+⛔ **Bot Temporarily Disabled**
+
+Bot abhi admin ne temporarily off kiya hua hai.
+Thodi der baad wapas try karo.
+"""
+
 FORCE_SUB_MSG = """
 ⚠️ **Bot Use Karne Ke Liye**
 
