@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+bot.log
+downloads/
+*.db
+*.sqlite
