@@ -101,7 +101,10 @@ def admin_main_kb():
             InlineKeyboardButton("🗑️ Clear Cache", callback_data="adm_clearcache"),
         ],
         [
+            InlineKeyboardButton("🍪 Add Cookies", callback_data="adm_addcookies"),
             InlineKeyboardButton("📣 Pin Message", callback_data="adm_pin"),
+        ],
+        [
             InlineKeyboardButton("🔗 Bot Link", callback_data="adm_botlink"),
         ],
     ])
@@ -110,6 +113,26 @@ def admin_back_kb():
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🔙 Admin Panel", callback_data="adm_back")
     ]])
+
+
+def cookies_platform_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("▶️ YouTube", callback_data="adm_cookie_youtube"),
+            InlineKeyboardButton("📸 Instagram", callback_data="adm_cookie_instagram"),
+        ],
+        [
+            InlineKeyboardButton("🎵 TikTok", callback_data="adm_cookie_tiktok"),
+            InlineKeyboardButton("🐦 Twitter/X", callback_data="adm_cookie_twitter"),
+        ],
+        [
+            InlineKeyboardButton("📘 Facebook", callback_data="adm_cookie_facebook"),
+            InlineKeyboardButton("🟠 Reddit", callback_data="adm_cookie_reddit"),
+        ],
+        [
+            InlineKeyboardButton("🔙 Admin Panel", callback_data="adm_back"),
+        ],
+    ])
 
 # ─────────────────────────────────────────
 #  ✅ FORCE SUBSCRIBE

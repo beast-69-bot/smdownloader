@@ -17,6 +17,7 @@ DEVELOPER    = "@YourUsername"
 # Download Settings
 MAX_FILE_MB  = 50                          # Telegram free limit 50MB
 DOWNLOAD_DIR = "downloads"
+COOKIES_DIR  = "cookies"
 DB_FILE      = "bot_data.db"
 MAX_RETRIES  = 3
 

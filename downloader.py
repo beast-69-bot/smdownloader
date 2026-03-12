@@ -5,7 +5,7 @@ import aiohttp
 import aiofiles
 import logging
 from pathlib import Path
-from config import LUFFY_API_URL, LUFFY_API_KEY, DOWNLOAD_DIR, MAX_FILE_MB
+from config import LUFFY_API_URL, LUFFY_API_KEY, DOWNLOAD_DIR, COOKIES_DIR, MAX_FILE_MB
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,13 @@ def detect_platform(url):
 def is_url(text):
     return bool(re.match(r'https?://', text.strip()))
 
+
+def get_cookie_file(platform):
+    cookie_path = Path(COOKIES_DIR) / f"{platform}.txt"
+    if cookie_path.exists():
+        return str(cookie_path)
+    return None
+
 # ─────────────────────────────────────────
 async def luffy_fetch(url):
     try:
@@ -65,14 +72,18 @@ async def luffy_fetch(url):
     return None
 
 # ─────────────────────────────────────────
-def ytdlp_info(url):
+def ytdlp_info(url, platform=None):
     try:
         import yt_dlp
+        platform = platform or detect_platform(url)
         opts = {
             "quiet": True, "no_warnings": True,
             "skip_download": True,
             "socket_timeout": 20,
         }
+        cookie_file = get_cookie_file(platform)
+        if cookie_file:
+            opts["cookiefile"] = cookie_file
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = []
@@ -95,11 +106,12 @@ def ytdlp_info(url):
         logger.error(f"yt-dlp info error: {e}")
         return None, []
 
-def ytdlp_download(url, fmt_id=None, audio_only=False, height_limit=None):
+def ytdlp_download(url, fmt_id=None, audio_only=False, height_limit=None, platform=None):
     try:
         import yt_dlp
         ts = int(time.time())
         out = f"{DOWNLOAD_DIR}/{ts}_%(title).50s.%(ext)s"
+        platform = platform or detect_platform(url)
 
         if audio_only:
             opts = {
@@ -127,6 +139,10 @@ def ytdlp_download(url, fmt_id=None, audio_only=False, height_limit=None):
                 "outtmpl": out, "merge_output_format": "mp4",
                 "quiet": True, "socket_timeout": 30,
             }
+
+        cookie_file = get_cookie_file(platform)
+        if cookie_file:
+            opts["cookiefile"] = cookie_file
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)

@@ -35,12 +35,12 @@ from database import (
 )
 from downloader import (
     detect_platform, is_url, luffy_fetch,
-    ytdlp_info, ytdlp_download, download_file,
+    ytdlp_info, ytdlp_download, download_file, get_cookie_file,
     file_size_mb, cleanup_old_files
 )
 from keyboards import (
     main_menu_kb, quality_kb, admin_main_kb, admin_back_kb,
-    force_sub_kb, feedback_kb, rating_kb, back_kb
+    force_sub_kb, feedback_kb, rating_kb, back_kb, cookies_platform_kb
 )
 from messages import (
     START_MSG, HELP_MSG, STATS_MSG, ABOUT_MSG, SITES_MSG,
@@ -63,6 +63,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 Path(config.DOWNLOAD_DIR).mkdir(exist_ok=True)
+Path(config.COOKIES_DIR).mkdir(exist_ok=True)
+
+COOKIE_PLATFORM_NAMES = {
+    "youtube": "YouTube",
+    "instagram": "Instagram",
+    "tiktok": "TikTok",
+    "twitter": "Twitter/X",
+    "facebook": "Facebook",
+    "reddit": "Reddit",
+}
 
 # ══════════════════════════════════════════
 #   MIDDLEWARE
@@ -408,6 +418,16 @@ async def cmd_search_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_user_search_results(results), parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_addcookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in config.ADMIN_IDS:
+        return
+    await update.message.reply_text(
+        "🍪 **Add Cookies**\n\nKis platform ki cookies add karni hain?",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=cookies_platform_kb()
+    )
+
+
 def format_user_search_results(results):
     msg = ""
     for u in results[:5]:
@@ -493,6 +513,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.MARKDOWN
             )
             return
+        elif s == "waiting_cookie_file" and user.id in config.ADMIN_IDS:
+            platform = state.get("data", {}).get("platform")
+            platform_name = COOKIE_PLATFORM_NAMES.get(platform, platform or "Selected platform")
+            await update.message.reply_text(
+                f"📎 **{platform_name} cookies file bhejo.**\n\nDocument upload karo, text nahi.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
 
     if not is_url(text):
         await update.message.reply_text(
@@ -529,7 +557,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Parallel: Luffy API + yt-dlp info
     luffy_task = asyncio.create_task(luffy_fetch(text))
     loop = asyncio.get_event_loop()
-    info_task = loop.run_in_executor(None, ytdlp_info, text)
+    info_task = loop.run_in_executor(None, ytdlp_info, text, platform)
 
     luffy_data = await luffy_task
     info, formats = await info_task
@@ -575,6 +603,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Thumb send failed: {e}")
 
     await update.message.reply_text(caption, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await middleware_check(update, context):
+        return
+
+    user = update.effective_user
+    state = get_user_state(user.id)
+    document = update.message.document
+
+    if not state or state["state"] != "waiting_cookie_file" or user.id not in config.ADMIN_IDS:
+        return
+
+    platform = state.get("data", {}).get("platform")
+    if not platform:
+        clear_user_state(user.id)
+        await update.message.reply_text("❌ Cookie upload session expire ho gaya. /addcookies dobara use karo.")
+        return
+
+    status_msg = await update.message.reply_text(
+        f"🍪 **{COOKIE_PLATFORM_NAMES.get(platform, platform.title())} cookies save ho rahi hain...**",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    try:
+        cookie_path = Path(config.COOKIES_DIR) / f"{platform}.txt"
+        tg_file = await context.bot.get_file(document.file_id)
+        await tg_file.download_to_drive(custom_path=str(cookie_path))
+        clear_user_state(user.id)
+        await status_msg.edit_text(
+            f"✅ **Cookies added!**\n\nPlatform: {COOKIE_PLATFORM_NAMES.get(platform, platform.title())}\nFile: `{cookie_path.name}`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Cookie upload error: {e}")
+        await status_msg.edit_text(
+            f"❌ Cookies save nahi hui: `{str(e)[:120]}`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
 
 # ══════════════════════════════════════════
 #   CALLBACK HANDLER
@@ -783,6 +851,14 @@ async def handle_admin_callback(q, data, user, context):
         )
         return
 
+    if action == "addcookies":
+        await q.message.edit_text(
+            "🍪 **Add Cookies**\n\nKis platform ki cookies add karni hain?",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=cookies_platform_kb()
+        )
+        return
+
     if action == "ban_prompt":
         set_user_state(user.id, "waiting_ban")
         await q.message.edit_text("🚫 **Ban User**\nUser ID bhejo:", parse_mode=ParseMode.MARKDOWN)
@@ -796,6 +872,20 @@ async def handle_admin_callback(q, data, user, context):
     if action == "search":
         set_user_state(user.id, "waiting_search_admin")
         await q.message.edit_text("🔍 **User Search**\nUser ID ya username bhejo:", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if action.startswith("cookie_"):
+        platform = action.split("_", 1)[1]
+        platform_name = COOKIE_PLATFORM_NAMES.get(platform, platform.title())
+        set_user_state(user.id, "waiting_cookie_file", {"platform": platform})
+        cookie_exists = "Existing file will be replaced.\n\n" if get_cookie_file(platform) else ""
+        await q.message.edit_text(
+            f"🍪 **{platform_name} Cookies**\n\n"
+            f"{cookie_exists}"
+            f"Ab `{platform}.txt` type ka cookies file document ke form me bhejo.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=admin_back_kb()
+        )
         return
 
     if action == "pin":
@@ -894,7 +984,7 @@ async def handle_download_callback(q, data, user, context):
 
     loop = asyncio.get_event_loop()
     filepath, dl_info = await loop.run_in_executor(
-        None, ytdlp_download, url, actual_fmt, audio_only, height_limit
+        None, ytdlp_download, url, actual_fmt, audio_only, height_limit, platform
     )
 
     if not filepath or not Path(filepath).exists():
@@ -1029,6 +1119,7 @@ async def post_init(app: Application):
         BotCommand("myid",        "🆔 Apna ID dekho"),
         BotCommand("refer",       "🔗 Referral link"),
         BotCommand("cancel",      "❌ Cancel karo"),
+        BotCommand("addcookies",  "🍪 Admin cookies add karo"),
     ])
     logger.info("✅ Bot commands set!")
 
@@ -1062,6 +1153,7 @@ def main():
     app.add_handler(CommandHandler("cancel",     cmd_cancel))
     app.add_handler(CommandHandler("myid",       cmd_myid))
     app.add_handler(CommandHandler("refer",      cmd_refer))
+    app.add_handler(CommandHandler("addcookies", cmd_addcookies))
 
     # Admin commands
     app.add_handler(CommandHandler("admin",       cmd_admin))
@@ -1078,6 +1170,7 @@ def main():
 
     # Message & callbacks
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(InlineQueryHandler(inline_handler))
 
