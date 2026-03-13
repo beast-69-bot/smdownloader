@@ -7,12 +7,12 @@
 ╚══════════════════════════════════════════════════╝
 """
 
-import os
 import asyncio
+import json
 import logging
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from telegram import (
     Update, BotCommand, InlineQueryResultArticle,
@@ -28,15 +28,40 @@ from telegram.error import TelegramError
 
 import config
 from database import (
-    init_db, register_user, get_user, is_banned, ban_user, unban_user,
-    get_setting, set_setting, log_download, get_stats, get_all_user_ids,
-    get_today_downloads, get_platform_stats, get_top_users,
-    get_recent_feedbacks, add_feedback, search_user
+    add_feedback,
+    ban_user,
+    block_api_key,
+    create_download_record,
+    expire_old_downloads,
+    get_all_user_ids,
+    get_api_key_for_user,
+    get_api_stats,
+    get_platform_stats,
+    get_recent_feedbacks,
+    get_setting,
+    get_stats,
+    get_today_downloads,
+    get_top_users,
+    get_user,
+    increment_rate_limit_hit,
+    init_db,
+    is_banned,
+    register_user,
+    search_user,
+    set_api_expiry,
+    set_api_max_duration,
+    set_api_rate_limit,
+    set_api_whitelist,
+    set_setting,
+    touch_api_key,
+    unblock_api_key,
+    unban_user,
+    update_download_status,
 )
 from downloader import (
     detect_platform, is_url, luffy_fetch,
-    ytdlp_info, ytdlp_download, download_file, get_cookie_file,
-    file_size_mb, cleanup_old_files
+    ytdlp_info, ytdlp_download, download_file, ensure_ytdlp_available,
+    get_cookie_file, file_size_mb, cleanup_old_files
 )
 from keyboards import (
     main_menu_kb, quality_kb, admin_main_kb, admin_back_kb,
@@ -73,6 +98,41 @@ COOKIE_PLATFORM_NAMES = {
     "facebook": "Facebook",
     "reddit": "Reddit",
 }
+
+_api_request_windows = {}
+
+
+def _trim_request_window(api_key_id, window_seconds=60):
+    now = time.time()
+    window = [stamp for stamp in _api_request_windows.get(api_key_id, []) if now - stamp < window_seconds]
+    _api_request_windows[api_key_id] = window
+    return window
+
+
+def check_api_request_limit(api_key_id, limit_per_minute):
+    if limit_per_minute <= 0:
+        return True, 0
+    window = _trim_request_window(api_key_id)
+    if len(window) >= limit_per_minute:
+        remaining = max(1, int(60 - (time.time() - window[0])))
+        return False, remaining
+    return True, 0
+
+
+def record_api_request(api_key_id):
+    window = _trim_request_window(api_key_id)
+    window.append(time.time())
+    _api_request_windows[api_key_id] = window
+
+
+def api_key_expired(api_key_row):
+    expires_at = (api_key_row["expires_at"] or "").strip()
+    if not expires_at:
+        return False
+    try:
+        return datetime.fromisoformat(expires_at) <= datetime.now()
+    except ValueError:
+        return False
 
 # ══════════════════════════════════════════
 #   MIDDLEWARE
@@ -244,6 +304,168 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Username: @{user.username or 'N/A'}\n"
         f"Language: {user.language_code or 'N/A'}",
         parse_mode=ParseMode.MARKDOWN
+    )
+
+
+def format_api_key_message(api_key_row):
+    expires_at = api_key_row["expires_at"] or "Never"
+    last_used = api_key_row["last_used_at"] or "N/A"
+    blocked = "Yes" if api_key_row["is_blocked"] else "No"
+    try:
+        whitelist_items = json.loads(api_key_row["ip_whitelist_json"] or "[]")
+    except Exception:
+        whitelist_items = []
+    whitelist = ", ".join(whitelist_items) if whitelist_items else "Not set"
+    return (
+        f"🔐 **Your API Key**\n\n"
+        f"Key: `{api_key_row['api_key']}`\n"
+        f"Rate Limit: {api_key_row['rate_limit']}/min\n"
+        f"Max Duration: {api_key_row['max_duration']} sec\n"
+        f"Blocked: {blocked}\n"
+        f"Expires: {expires_at}\n"
+        f"Last Used: {last_used}\n"
+        f"IP Whitelist: {whitelist}\n"
+        f"Rate Limit Hits: {api_key_row['rate_limit_hits']}\n"
+    )
+
+
+async def cmd_mykey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await middleware_check(update, context):
+        return
+    api_key = get_api_key_for_user(update.effective_user.id)
+    if not api_key:
+        await update.message.reply_text("❌ API key abhi generate nahi hui.")
+        return
+    await update.message.reply_text(format_api_key_message(api_key), parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_apistats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in config.ADMIN_IDS:
+        return
+    target_user_id = None
+    if context.args:
+        try:
+            target_user_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("Usage: /apistats [user_id]")
+            return
+
+    rows = get_api_stats(15, target_user_id)
+    if not rows:
+        await update.message.reply_text("❌ API stats available nahi hain.")
+        return
+
+    message = "📊 **API Key Stats**\n\n"
+    for row in rows:
+        message += (
+            f"👤 {row['full_name'] or row['name']} (`{row['user_id']}`)\n"
+            f"🔐 `{row['api_key'][:20]}...`\n"
+            f"📥 Usage: {row['usage_count']} | ⏱️ RL: {row['rate_limit']}/min | 🎬 Max: {row['max_duration']}s\n"
+            f"🚧 RL Hits: {row['rate_limit_hits']} | 🚫 Blocked: {'Yes' if row['is_blocked'] else 'No'}\n"
+            f"🕐 Last Used: {row['last_used_at'] or 'N/A'}\n\n"
+        )
+    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_setrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in config.ADMIN_IDS:
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /setrate <user_id> <requests_per_minute>")
+        return
+    try:
+        user_id = int(context.args[0])
+        rate_limit = max(0, int(context.args[1]))
+    except ValueError:
+        await update.message.reply_text("❌ Numbers sahi format me do.")
+        return
+    set_api_rate_limit(user_id, rate_limit)
+    await update.message.reply_text(f"✅ API rate limit for `{user_id}` set to `{rate_limit}/min`", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_setmaxdur(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in config.ADMIN_IDS:
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /setmaxdur <user_id> <seconds>")
+        return
+    try:
+        user_id = int(context.args[0])
+        max_duration = max(0, int(context.args[1]))
+    except ValueError:
+        await update.message.reply_text("❌ Numbers sahi format me do.")
+        return
+    set_api_max_duration(user_id, max_duration)
+    await update.message.reply_text(f"✅ Max duration for `{user_id}` set to `{max_duration}` sec", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_blockkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in config.ADMIN_IDS:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /blockkey <user_id> [reason]")
+        return
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Valid user ID do.")
+        return
+    reason = " ".join(context.args[1:]) if len(context.args) > 1 else ""
+    block_api_key(user_id, reason)
+    await update.message.reply_text(f"🚫 API key for `{user_id}` blocked.", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_unblockkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in config.ADMIN_IDS:
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /unblockkey <user_id>")
+        return
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Valid user ID do.")
+        return
+    unblock_api_key(user_id)
+    await update.message.reply_text(f"✅ API key for `{user_id}` unblocked.", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_setips(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in config.ADMIN_IDS:
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /setips <user_id> <ip1,ip2,...>")
+        return
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Valid user ID do.")
+        return
+    ip_list = [item.strip() for item in " ".join(context.args[1:]).split(",") if item.strip()]
+    set_api_whitelist(user_id, ip_list)
+    await update.message.reply_text(
+        f"🟡 Stored IP whitelist for `{user_id}`:\n`{', '.join(ip_list) or 'None'}`",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def cmd_setkeyexpiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in config.ADMIN_IDS:
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /setkeyexpiry <user_id> <days_from_now|0>")
+        return
+    try:
+        user_id = int(context.args[0])
+        days = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Valid numbers do.")
+        return
+    expires_at = "" if days <= 0 else (datetime.now() + timedelta(days=days)).isoformat()
+    set_api_expiry(user_id, expires_at)
+    await update.message.reply_text(
+        f"✅ API key expiry for `{user_id}` set to `{expires_at or 'Never'}`",
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 # ══════════════════════════════════════════
@@ -529,6 +751,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    api_key_row = get_api_key_for_user(user.id)
+    if not api_key_row:
+        await update.message.reply_text("❌ API key available nahi hai. /start dobara use karo.")
+        return
+
+    if api_key_row["is_blocked"]:
+        await update.message.reply_text(
+            f"🚫 **API key blocked hai!**\n\nReason: {api_key_row['block_reason'] or 'N/A'}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    if api_key_expired(api_key_row):
+        await update.message.reply_text(
+            "⏰ **API key expired hai!**\nAdmin se renew karvao.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    if config.ENFORCE_IP_WHITELIST and (api_key_row["ip_whitelist_json"] or "[]") != "[]":
+        await update.message.reply_text(
+            "🟡 IP whitelist configured hai, lekin Telegram bot mode me IP enforce nahi hoti.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    within_rate, retry_after = check_api_request_limit(api_key_row["id"], api_key_row["rate_limit"])
+    if not within_rate:
+        increment_rate_limit_hit(api_key_row["id"])
+        await update.message.reply_text(
+            f"⏳ **Rate limit hit!**\n{retry_after}s baad dobara try karo.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    record_api_request(api_key_row["id"])
+    touch_api_key(api_key_row["id"])
+
     # Cooldown check
     ok, remaining = check_cooldown(user.id, config.COOLDOWN_SECONDS)
     if not ok:
@@ -582,6 +841,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duration   = (info or {}).get("duration", 0) or 0
     views      = (info or {}).get("view_count", 0) or 0
     thumb_url  = (info or {}).get("thumbnail")
+
+    if api_key_row["max_duration"] > 0 and duration and duration > api_key_row["max_duration"] and user.id not in config.ADMIN_IDS:
+        await update.message.reply_text(
+            f"⚠️ **Duration limit exceeded!**\nAllowed: `{api_key_row['max_duration']}s`\nVideo: `{duration}s`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
 
     caption = VIDEO_INFO_MSG(title, uploader, duration, views, platform, bool(thumb_url))
 
@@ -935,6 +1201,14 @@ async def handle_download_callback(q, data, user, context):
     thumb_only  = (dl_type == "thumb")
     platform    = detect_platform(url)
     title       = info.get("title", "Video") or "Video"
+    api_key_row = get_api_key_for_user(user.id)
+
+    if api_key_row and api_key_row["is_blocked"]:
+        await q.answer("🚫 API key blocked!", show_alert=True)
+        return
+    if api_key_row and api_key_expired(api_key_row):
+        await q.answer("⏰ API key expired!", show_alert=True)
+        return
 
     # Edit message
     processing_text = "🎵 Audio extract ho raha hai..." if audio_only else "🖼️ Thumbnail..." if thumb_only else "⬇️ Downloading..."
@@ -972,6 +1246,27 @@ async def handle_download_callback(q, data, user, context):
         await context.bot.send_message(q.message.chat_id, "❌ Thumbnail nahi mila!")
         return
 
+    duration_seconds = int((info or {}).get("duration") or 0)
+    if api_key_row and api_key_row["max_duration"] > 0 and duration_seconds > api_key_row["max_duration"] and user.id not in config.ADMIN_IDS:
+        await context.bot.send_message(
+            q.message.chat_id,
+            f"⚠️ **Duration limit exceeded!**\nAllowed: `{api_key_row['max_duration']}s`\nVideo: `{duration_seconds}s`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    quality_label = "Audio MP3" if audio_only else (fmt_id if fmt_id != "best" else "Best Quality")
+    download_id = create_download_record(
+        user.id,
+        url,
+        platform,
+        quality_label,
+        title=title,
+        api_key_id=(api_key_row["id"] if api_key_row else 0),
+        duration_seconds=duration_seconds,
+    )
+    update_download_status(download_id, "processing", title=title, duration_seconds=duration_seconds, quality=quality_label)
+
     # Height limit from format ID
     height_limit = None
     actual_fmt = None
@@ -982,6 +1277,7 @@ async def handle_download_callback(q, data, user, context):
     else:
         actual_fmt = fmt_id
 
+    filepath = None
     loop = asyncio.get_event_loop()
     filepath, dl_info = await loop.run_in_executor(
         None, ytdlp_download, url, actual_fmt, audio_only, height_limit, platform
@@ -994,8 +1290,11 @@ async def handle_download_callback(q, data, user, context):
             ts = int(time.time())
             save_path = f"{config.DOWNLOAD_DIR}/{ts}_video.mp4"
             filepath = await download_file(luffy["download_url"], save_path)
+            if filepath:
+                update_download_status(download_id, "processing", file_path=filepath)
 
     if not filepath or not Path(filepath).exists():
+        update_download_status(download_id, "failed", error_message="Download failed before file creation")
         await context.bot.send_message(
             q.message.chat_id,
             "❌ **Download fail hua!**\n\nDobara try karo ya dusri quality choose karo.",
@@ -1003,10 +1302,13 @@ async def handle_download_callback(q, data, user, context):
         )
         return
 
+    update_download_status(download_id, "processing", file_path=filepath)
+
     size_mb = file_size_mb(filepath)
 
     if size_mb > config.MAX_FILE_MB:
         Path(filepath).unlink(missing_ok=True)
+        update_download_status(download_id, "failed", file_path="", error_message=f"File too large: {size_mb:.1f}MB")
         await context.bot.send_message(
             q.message.chat_id,
             f"⚠️ **File bahut badi hai!** ({size_mb:.1f}MB)\n"
@@ -1016,7 +1318,6 @@ async def handle_download_callback(q, data, user, context):
         )
         return
 
-    quality_label = "Audio MP3" if audio_only else (fmt_id if fmt_id != "best" else "Best Quality")
     caption = DOWNLOAD_DONE_MSG(title, platform, quality_label, size_mb, (await context.bot.get_me()).username)
 
     thumb_url = (dl_info or info or {}).get("thumbnail")
@@ -1049,7 +1350,15 @@ async def handle_download_callback(q, data, user, context):
                 if thumb_file:
                     thumb_file.close()
 
-        log_download(user.id, url, platform, quality_label, f"{size_mb:.1f}MB", title)
+        update_download_status(
+            download_id,
+            "success",
+            file_path="",
+            file_size=f"{size_mb:.1f}MB",
+            title=title,
+            duration_seconds=int((dl_info or info or {}).get("duration") or duration_seconds),
+            quality=quality_label,
+        )
 
         if config.LOG_CHANNEL:
             try:
@@ -1068,9 +1377,11 @@ async def handle_download_callback(q, data, user, context):
 
     except Exception as e:
         logger.error(f"Send error: {e}")
+        update_download_status(download_id, "failed", error_message=str(e), file_path=filepath or "")
         await context.bot.send_message(q.message.chat_id, f"❌ File send nahi hui: {str(e)[:100]}")
     finally:
-        Path(filepath).unlink(missing_ok=True)
+        if filepath:
+            Path(filepath).unlink(missing_ok=True)
         if thumb_path:
             Path(thumb_path).unlink(missing_ok=True)
 
@@ -1105,6 +1416,20 @@ async def inline_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )]
         await update.inline_query.answer(results, cache_time=5)
 
+
+async def hourly_cleanup_loop(app: Application):
+    while True:
+        try:
+            loop = asyncio.get_running_loop()
+            expired = await loop.run_in_executor(None, expire_old_downloads, config.FILE_RETENTION_HOURS)
+            cleanup_old_files(config.FILE_RETENTION_HOURS * 3600)
+            if expired:
+                logger.info("🧹 Hourly cleanup expired %s stale download rows", expired)
+        except Exception as e:
+            logger.error("Cleanup loop error: %s", e)
+        await asyncio.sleep(config.CLEANUP_INTERVAL_SECONDS)
+
+
 # ══════════════════════════════════════════
 #   STARTUP & MAIN
 # ══════════════════════════════════════════
@@ -1117,14 +1442,24 @@ async def post_init(app: Application):
         BotCommand("feedback",    "💬 Feedback do"),
         BotCommand("ping",        "🏓 Bot check karo"),
         BotCommand("myid",        "🆔 Apna ID dekho"),
+        BotCommand("mykey",       "🔐 API key dekho"),
         BotCommand("refer",       "🔗 Referral link"),
         BotCommand("cancel",      "❌ Cancel karo"),
         BotCommand("addcookies",  "🍪 Admin cookies add karo"),
+        BotCommand("apistats",    "📊 API stats admin"),
     ])
     logger.info("✅ Bot commands set!")
 
-    # Cleanup old files on startup
-    cleanup_old_files(3600)
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, ensure_ytdlp_available)
+        logger.info("✅ yt-dlp backend ready")
+    except Exception as e:
+        logger.warning("yt-dlp bootstrap failed: %s", e)
+
+    await loop.run_in_executor(None, expire_old_downloads, config.FILE_RETENTION_HOURS)
+    cleanup_old_files(config.FILE_RETENTION_HOURS * 3600)
+    app.bot_data["cleanup_task"] = asyncio.create_task(hourly_cleanup_loop(app))
 
     # Notify admins
     for admin_id in config.ADMIN_IDS:
@@ -1152,6 +1487,7 @@ def main():
     app.add_handler(CommandHandler("feedback",   cmd_feedback))
     app.add_handler(CommandHandler("cancel",     cmd_cancel))
     app.add_handler(CommandHandler("myid",       cmd_myid))
+    app.add_handler(CommandHandler("mykey",      cmd_mykey))
     app.add_handler(CommandHandler("refer",      cmd_refer))
     app.add_handler(CommandHandler("addcookies", cmd_addcookies))
 
@@ -1167,6 +1503,13 @@ def main():
     app.add_handler(CommandHandler("setwelcome",  cmd_setwelcome))
     app.add_handler(CommandHandler("users",       cmd_users))
     app.add_handler(CommandHandler("searchuser",  cmd_search_user))
+    app.add_handler(CommandHandler("apistats",    cmd_apistats))
+    app.add_handler(CommandHandler("setrate",     cmd_setrate))
+    app.add_handler(CommandHandler("setmaxdur",   cmd_setmaxdur))
+    app.add_handler(CommandHandler("blockkey",    cmd_blockkey))
+    app.add_handler(CommandHandler("unblockkey",  cmd_unblockkey))
+    app.add_handler(CommandHandler("setips",      cmd_setips))
+    app.add_handler(CommandHandler("setkeyexpiry", cmd_setkeyexpiry))
 
     # Message & callbacks
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

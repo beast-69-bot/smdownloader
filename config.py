@@ -18,12 +18,20 @@ DEVELOPER    = "@YourUsername"
 MAX_FILE_MB  = 50                          # Telegram free limit 50MB
 DOWNLOAD_DIR = "downloads"
 COOKIES_DIR  = "cookies"
+YTDLP_BINARY_DIR = "bin"
 DB_FILE      = "bot_data.db"
 MAX_RETRIES  = 3
+AUTO_INSTALL_YTDLP = True
 
 # Rate Limiting
 MAX_DAILY_DOWNLOADS = 20                   # Per user daily limit (0 = unlimited)
 COOLDOWN_SECONDS = 5                       # Between downloads
+DEFAULT_API_RATE_LIMIT = 10                # Requests per minute per user key
+DEFAULT_MAX_DURATION = 7200                # Max video duration in seconds
+API_KEY_PREFIX = "dk"
+FILE_RETENTION_HOURS = 12
+CLEANUP_INTERVAL_SECONDS = 3600
+ENFORCE_IP_WHITELIST = False               # Store-only for Telegram bot mode
 
 # Luffy API
 LUFFY_API_KEY = "luffy"
