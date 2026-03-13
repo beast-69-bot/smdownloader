@@ -17,12 +17,16 @@ from config import (
     AUTO_INSTALL_YTDLP,
     COOKIES_DIR,
     DOWNLOAD_DIR,
-    LUFFY_API_KEY,
-    LUFFY_API_URL,
     YTDLP_BINARY_DIR,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class CookiesRequiredError(Exception):
+    """Raised when yt-dlp fails due to missing/expired cookies."""
+
+    pass
 
 PLATFORMS = {
     "instagram": r"instagram\.com\/(p|reel|tv|stories)\/",
@@ -45,6 +49,14 @@ PLATFORMS = {
 }
 
 _YTDLP_BACKEND = None
+COOKIE_REQUIRED_KEYWORDS = [
+    "sign in",
+    "login required",
+    "confirm your age",
+    "members only",
+    "private video",
+    "this video is unavailable",
+]
 
 
 def detect_platform(url):
@@ -151,30 +163,9 @@ def _extract_formats(info):
     return formats
 
 
-async def luffy_fetch(url):
-    try:
-        import urllib.parse
-
-        encoded = urllib.parse.quote(url, safe="")
-        api_url = f"{LUFFY_API_URL}?key={LUFFY_API_KEY}&url={encoded}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                data = await resp.json(content_type=None)
-                if not data:
-                    return None
-                for key in ["url", "download", "video", "link", "media", "data", "result"]:
-                    val = data.get(key)
-                    if isinstance(val, str) and val.startswith("http"):
-                        return {"download_url": val, "data": data}
-                    if isinstance(val, list) and val:
-                        for item in val:
-                            if isinstance(item, dict):
-                                for subkey in ["url", "download_url", "link"]:
-                                    if isinstance(item.get(subkey), str) and item[subkey].startswith("http"):
-                                        return {"download_url": item[subkey], "data": data, "formats": val}
-    except Exception as e:
-        logger.warning(f"Luffy API error: {e}")
-    return None
+def _is_cookie_required_error(error_text):
+    text = (error_text or "").lower()
+    return any(keyword in text for keyword in COOKIE_REQUIRED_KEYWORDS)
 
 
 def ytdlp_info(url, platform=None):
@@ -199,6 +190,12 @@ def ytdlp_info(url, platform=None):
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 return info, _extract_formats(info)
+        except yt_dlp.utils.DownloadError as e:
+            err = str(e)
+            if not cookie_file and _is_cookie_required_error(err):
+                raise CookiesRequiredError(platform) from e
+            logger.error(f"yt-dlp info error: {e}")
+            return None, []
         except Exception as e:
             logger.error(f"yt-dlp info error: {e}")
             return None, []
@@ -218,9 +215,14 @@ def ytdlp_info(url, platform=None):
             errors="replace",
         )
         if result.returncode != 0 or not result.stdout.strip():
-            raise RuntimeError(result.stderr.strip() or "yt-dlp info command failed")
+            err = (result.stderr or result.stdout or "").strip()
+            if not cookie_file and _is_cookie_required_error(err):
+                raise CookiesRequiredError(platform)
+            raise RuntimeError(err or "yt-dlp info command failed")
         info = json.loads(result.stdout)
         return info, _extract_formats(info)
+    except CookiesRequiredError:
+        raise
     except Exception as e:
         logger.error(f"yt-dlp info error: {e}")
         return None, []
@@ -281,6 +283,12 @@ def ytdlp_download(url, fmt_id=None, audio_only=False, height_limit=None, platfo
                     if candidates:
                         filepath = str(candidates[0])
                 return filepath, info
+        except yt_dlp.utils.DownloadError as e:
+            err = str(e)
+            if not cookie_file and _is_cookie_required_error(err):
+                raise CookiesRequiredError(platform) from e
+            logger.error(f"yt-dlp download error: {e}")
+            return None, None
         except Exception as e:
             logger.error(f"yt-dlp download error: {e}")
             return None, None
@@ -314,7 +322,10 @@ def ytdlp_download(url, fmt_id=None, audio_only=False, height_limit=None, platfo
             errors="replace",
         )
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "yt-dlp download command failed")
+            err = (result.stderr or result.stdout or "").strip()
+            if not cookie_file and _is_cookie_required_error(err):
+                raise CookiesRequiredError(platform)
+            raise RuntimeError(err or "yt-dlp download command failed")
 
         filepath = None
         for line in reversed([line.strip() for line in result.stdout.splitlines() if line.strip()]):
@@ -328,6 +339,8 @@ def ytdlp_download(url, fmt_id=None, audio_only=False, height_limit=None, platfo
 
         info, _ = ytdlp_info(url, platform)
         return filepath, info
+    except CookiesRequiredError:
+        raise
     except Exception as e:
         logger.error(f"yt-dlp download error: {e}")
         return None, None

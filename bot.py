@@ -59,9 +59,16 @@ from database import (
     update_download_status,
 )
 from downloader import (
-    detect_platform, is_url, luffy_fetch,
-    ytdlp_info, ytdlp_download, download_file, ensure_ytdlp_available,
-    get_cookie_file, file_size_mb, cleanup_old_files
+    CookiesRequiredError,
+    detect_platform,
+    is_url,
+    ytdlp_info,
+    ytdlp_download,
+    download_file,
+    ensure_ytdlp_available,
+    get_cookie_file,
+    file_size_mb,
+    cleanup_old_files,
 )
 from keyboards import (
     main_menu_kb, quality_kb, admin_main_kb, admin_back_kb,
@@ -813,15 +820,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
 
-    # Parallel: Luffy API + yt-dlp info
-    luffy_task = asyncio.create_task(luffy_fetch(text))
     loop = asyncio.get_event_loop()
     info_task = loop.run_in_executor(None, ytdlp_info, text, platform)
+    try:
+        info, formats = await info_task
+    except CookiesRequiredError:
+        await status_msg.edit_text(
+            "🔐 *Yeh video cookies chahta hai!*\n\n"
+            "Possible reasons:\n"
+            "• Age-restricted video\n"
+            "• Members-only content\n"
+            "• Login required\n\n"
+            "Admin se cookies add karwao: `/addcookies`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
 
-    luffy_data = await luffy_task
-    info, formats = await info_task
-
-    if not info and not luffy_data:
+    if not info:
         await status_msg.edit_text(
             "❌ **Kuch nahi mila!**\n\n"
             "Possible reasons:\n"
@@ -832,6 +847,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN
         )
         return
+
+    if platform == "youtube" and info.get("age_limit", 0) > 0 and not get_cookie_file("youtube"):
+        if config.LOG_CHANNEL:
+            try:
+                await context.bot.send_message(
+                    config.LOG_CHANNEL,
+                    f"⚠️ Age-restricted video accessed without cookies!\n"
+                    f"User: {user.id} | URL: {text[:80]}"
+                )
+            except Exception:
+                pass
 
     url_hash = store_url(text, info, formats)
     kb = quality_kb(formats, url_hash, text)
@@ -1279,19 +1305,18 @@ async def handle_download_callback(q, data, user, context):
 
     filepath = None
     loop = asyncio.get_event_loop()
-    filepath, dl_info = await loop.run_in_executor(
-        None, ytdlp_download, url, actual_fmt, audio_only, height_limit, platform
-    )
-
-    if not filepath or not Path(filepath).exists():
-        # Try Luffy API fallback for direct download
-        luffy = await luffy_fetch(url)
-        if luffy and luffy.get("download_url"):
-            ts = int(time.time())
-            save_path = f"{config.DOWNLOAD_DIR}/{ts}_video.mp4"
-            filepath = await download_file(luffy["download_url"], save_path)
-            if filepath:
-                update_download_status(download_id, "processing", file_path=filepath)
+    try:
+        filepath, dl_info = await loop.run_in_executor(
+            None, ytdlp_download, url, actual_fmt, audio_only, height_limit, platform
+        )
+    except CookiesRequiredError:
+        update_download_status(download_id, "failed", error_message="Cookies required for this content")
+        await context.bot.send_message(
+            q.message.chat_id,
+            "🔐 *Cookies required!*\n\nYeh video bina login ke download nahi ho sakta.\nAdmin se cookies update karwao.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
 
     if not filepath or not Path(filepath).exists():
         update_download_status(download_id, "failed", error_message="Download failed before file creation")

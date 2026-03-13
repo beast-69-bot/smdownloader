@@ -33,7 +33,7 @@ FILE_RETENTION_HOURS = 12
 CLEANUP_INTERVAL_SECONDS = 3600
 ENFORCE_IP_WHITELIST = False               # Store-only for Telegram bot mode
 
-# Luffy API
+# Luffy API (Deprecated: not used)
 LUFFY_API_KEY = "luffy"
 LUFFY_API_URL = "https://luffy-api.is-dev.org/api/down"
 
