@@ -1403,8 +1403,45 @@ async def handle_download_callback(q, data, user, context):
                     headers=rapidapi_download_headers(rapid_url),
                     timeout_seconds=180,
                 )
+                if (not filepath or not Path(filepath).exists()) and "api-v3.smdw.xyz" in rapid_url:
+                    # Proxied tunnel can return 403; retry once with normal access URLs.
+                    ra_info_normal, ra_formats_normal = await loop.run_in_executor(
+                        None, rapidapi_info, url, platform, "normal", ""
+                    )
+                    if ra_formats_normal:
+                        chosen_normal = None
+                        if requested_height:
+                            exact_normal = [fmt for fmt in ra_formats_normal if int(fmt.get("height") or 0) == requested_height]
+                            if exact_normal:
+                                chosen_normal = exact_normal[0]
+                        if not chosen_normal and requested_quality:
+                            for fmt in ra_formats_normal:
+                                if requested_quality in str(fmt.get("quality") or "").strip().lower():
+                                    chosen_normal = fmt
+                                    break
+                        if not chosen_normal:
+                            chosen_normal = ra_formats_normal[0]
+
+                        rapid_url_normal = str((chosen_normal or {}).get("direct_url") or "").strip()
+                        if rapid_url_normal:
+                            rapid_ext_normal = str((chosen_normal or {}).get("ext") or "mp4").split("?")[0].strip(".").lower()
+                            if not rapid_ext_normal or len(rapid_ext_normal) > 5:
+                                rapid_ext_normal = "mp4"
+                            rapid_path_normal = str(Path(config.DOWNLOAD_DIR) / f"{int(time.time())}_{url_hash}_ra_n.{rapid_ext_normal}")
+                            filepath = await download_file(
+                                rapid_url_normal,
+                                rapid_path_normal,
+                                headers=rapidapi_download_headers(rapid_url_normal),
+                                timeout_seconds=180,
+                            )
+                            if filepath and Path(filepath).exists():
+                                dl_info = ra_info_normal or ra_info or info
+                                if chosen_normal.get("quality"):
+                                    quality_label = chosen_normal["quality"]
+
                 if filepath and Path(filepath).exists():
-                    dl_info = ra_info or info
+                    if dl_info is None:
+                        dl_info = ra_info or info
                     if chosen.get("quality"):
                         quality_label = chosen["quality"]
 

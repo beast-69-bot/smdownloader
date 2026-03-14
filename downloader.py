@@ -277,16 +277,20 @@ def _extract_instagram_shortcode(url):
     return None
 
 
-def _rapidapi_route_and_params(url, platform):
+def _rapidapi_route_and_params(url, platform, url_access=None, renderable_formats=None):
+    effective_url_access = (url_access or RAPIDAPI_URL_ACCESS or "").strip().lower()
+    effective_renderable_formats = (renderable_formats if renderable_formats is not None else RAPIDAPI_RENDERABLE_FORMATS)
+    effective_renderable_formats = str(effective_renderable_formats or "").strip()
+
     if platform == "youtube":
         video_id = _extract_youtube_video_id(url)
         if not video_id:
             return None, None
         params = {"videoId": video_id, "lang": "en-US"}
-        if RAPIDAPI_URL_ACCESS in {"normal", "proxied"}:
-            params["urlAccess"] = RAPIDAPI_URL_ACCESS
-        if RAPIDAPI_RENDERABLE_FORMATS:
-            params["renderableFormats"] = RAPIDAPI_RENDERABLE_FORMATS
+        if effective_url_access in {"normal", "proxied"}:
+            params["urlAccess"] = effective_url_access
+        if effective_renderable_formats:
+            params["renderableFormats"] = effective_renderable_formats
         return "/youtube/v3/video/details", params
 
     if platform == "instagram":
@@ -294,14 +298,14 @@ def _rapidapi_route_and_params(url, platform):
         if not shortcode:
             return None, None
         params = {"shortcode": shortcode}
-        if RAPIDAPI_RENDERABLE_FORMATS:
-            params["renderableFormats"] = RAPIDAPI_RENDERABLE_FORMATS
+        if effective_renderable_formats:
+            params["renderableFormats"] = effective_renderable_formats
         return "/instagram/v3/media/post/details", params
 
     if platform == "facebook":
         params = {"url": url}
-        if RAPIDAPI_RENDERABLE_FORMATS:
-            params["renderableFormats"] = RAPIDAPI_RENDERABLE_FORMATS
+        if effective_renderable_formats:
+            params["renderableFormats"] = effective_renderable_formats
         return "/facebook/v3/post/details", params
 
     if platform == "tiktok":
@@ -383,12 +387,12 @@ def _rapidapi_extract_formats(payload):
     return formats
 
 
-def rapidapi_info(url, platform=None):
+def rapidapi_info(url, platform=None, url_access=None, renderable_formats=None):
     platform = platform or detect_platform(url)
     if not rapidapi_enabled() or platform not in RAPIDAPI_SUPPORTED_PLATFORMS:
         return None, []
 
-    route, params = _rapidapi_route_and_params(url, platform)
+    route, params = _rapidapi_route_and_params(url, platform, url_access=url_access, renderable_formats=renderable_formats)
     if not route:
         return None, []
 
