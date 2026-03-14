@@ -189,7 +189,8 @@ def rapidapi_download_headers(target_url=None):
     if not rapidapi_enabled():
         return None
     if target_url:
-        host = urllib.parse.urlparse(target_url).netloc.lower()
+        parsed = urllib.parse.urlparse(target_url)
+        host = (parsed.hostname or parsed.netloc or "").lower()
         allowed_hosts = {
             RAPIDAPI_HOST.lower(),
             "api-v3.smdw.xyz",
@@ -635,7 +636,8 @@ def ytdlp_download(url, fmt_id=None, audio_only=False, height_limit=None, platfo
 async def download_file(url, save_path, headers=None, timeout_seconds=60):
     try:
         async with aiohttp.ClientSession() as session:
-            parsed_host = urllib.parse.urlparse(url).netloc.lower()
+            parsed = urllib.parse.urlparse(url)
+            parsed_host = (parsed.hostname or parsed.netloc or "").lower()
             request_headers = headers or {}
             async with session.get(
                 url,
