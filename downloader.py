@@ -190,7 +190,12 @@ def rapidapi_download_headers(target_url=None):
         return None
     if target_url:
         host = urllib.parse.urlparse(target_url).netloc.lower()
-        if RAPIDAPI_HOST.lower() not in host:
+        allowed_hosts = {
+            RAPIDAPI_HOST.lower(),
+            "api-v3.smdw.xyz",
+            "api.smdw.xyz",
+        }
+        if host not in allowed_hosts and not host.endswith(f".{RAPIDAPI_HOST.lower()}"):
             return None
     return {
         "X-RapidAPI-Key": RAPIDAPI_KEY,
