@@ -60,6 +60,9 @@ from database import (
 )
 from downloader import (
     CookiesRequiredError,
+    rapidapi_download_headers,
+    rapidapi_enabled,
+    rapidapi_info,
     detect_platform,
     is_url,
     ytdlp_info,
@@ -822,19 +825,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     loop = asyncio.get_event_loop()
     info_task = loop.run_in_executor(None, ytdlp_info, text, platform)
+    used_rapidapi_fallback = False
     try:
         info, formats = await info_task
     except CookiesRequiredError:
-        await status_msg.edit_text(
-            "🔐 *Yeh video cookies chahta hai!*\n\n"
-            "Possible reasons:\n"
-            "• Age-restricted video\n"
-            "• Members-only content\n"
-            "• Login required\n\n"
-            "Admin se cookies add karwao: `/addcookies`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
+        info, formats = (None, [])
+        if rapidapi_enabled():
+            info, formats = await loop.run_in_executor(None, rapidapi_info, text, platform)
+            used_rapidapi_fallback = bool(info)
+        if not info:
+            await status_msg.edit_text(
+                "🔐 *Yeh video cookies chahta hai!*\n\n"
+                "Possible reasons:\n"
+                "• Age-restricted video\n"
+                "• Members-only content\n"
+                "• Login required\n\n"
+                "Admin se cookies add karwao: `/addcookies`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+    if not info:
+        if rapidapi_enabled():
+            info, formats = await loop.run_in_executor(None, rapidapi_info, text, platform)
+            used_rapidapi_fallback = bool(info)
 
     if not info:
         await status_msg.edit_text(
@@ -858,6 +872,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception:
                 pass
+
+    if used_rapidapi_fallback and config.LOG_CHANNEL:
+        try:
+            await context.bot.send_message(
+                config.LOG_CHANNEL,
+                f"ℹ️ RapidAPI fallback used | User: {user.id} | Platform: {platform} | URL: {text[:80]}"
+            )
+        except Exception:
+            pass
 
     url_hash = store_url(text, info, formats)
     kb = quality_kb(formats, url_hash, text)
@@ -1216,6 +1239,7 @@ async def handle_download_callback(q, data, user, context):
     url    = cached["url"]
     info   = cached.get("info") or {}
     formats = cached.get("formats") or []
+    selected_format = next((fmt for fmt in formats if str(fmt.get("format_id")) == str(fmt_id)), None)
 
     # Cooldown
     ok, remaining = check_cooldown(user.id, config.COOLDOWN_SECONDS)
@@ -1281,7 +1305,9 @@ async def handle_download_callback(q, data, user, context):
         )
         return
 
-    quality_label = "Audio MP3" if audio_only else (fmt_id if fmt_id != "best" else "Best Quality")
+    quality_label = "Audio MP3" if audio_only else (selected_format.get("quality") if selected_format else None)
+    if not quality_label:
+        quality_label = fmt_id if fmt_id != "best" else "Best Quality"
     download_id = create_download_record(
         user.id,
         url,
@@ -1296,27 +1322,50 @@ async def handle_download_callback(q, data, user, context):
     # Height limit from format ID
     height_limit = None
     actual_fmt = None
+    is_rapidapi_format = bool(selected_format and selected_format.get("source") == "rapidapi")
     if fmt_id in ("best", "audio"):
         pass
+    elif is_rapidapi_format:
+        rapid_height = selected_format.get("height") if selected_format else 0
+        if rapid_height:
+            height_limit = int(rapid_height)
     elif fmt_id.endswith("p"):
         height_limit = int(fmt_id[:-1])
     else:
         actual_fmt = fmt_id
 
     filepath = None
+    dl_info = None
     loop = asyncio.get_event_loop()
-    try:
-        filepath, dl_info = await loop.run_in_executor(
-            None, ytdlp_download, url, actual_fmt, audio_only, height_limit, platform
+    direct_url = ""
+    if selected_format and not audio_only:
+        direct_url = str(selected_format.get("direct_url") or "").strip()
+    if direct_url:
+        ext = (selected_format.get("ext") or "mp4").split("?")[0].strip(".").lower()
+        if not ext or len(ext) > 5:
+            ext = "mp4"
+        filepath = str(Path(config.DOWNLOAD_DIR) / f"{int(time.time())}_{url_hash}.{ext}")
+        filepath = await download_file(
+            direct_url,
+            filepath,
+            headers=rapidapi_download_headers(direct_url),
+            timeout_seconds=120,
         )
-    except CookiesRequiredError:
-        update_download_status(download_id, "failed", error_message="Cookies required for this content")
-        await context.bot.send_message(
-            q.message.chat_id,
-            "🔐 *Cookies required!*\n\nYeh video bina login ke download nahi ho sakta.\nAdmin se cookies update karwao.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
+        dl_info = info
+
+    if not filepath:
+        try:
+            filepath, dl_info = await loop.run_in_executor(
+                None, ytdlp_download, url, actual_fmt, audio_only, height_limit, platform
+            )
+        except CookiesRequiredError:
+            update_download_status(download_id, "failed", error_message="Cookies required for this content")
+            await context.bot.send_message(
+                q.message.chat_id,
+                "🔐 *Cookies required!*\n\nYeh video bina login ke download nahi ho sakta.\nAdmin se cookies update karwao.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
 
     if not filepath or not Path(filepath).exists():
         update_download_status(download_id, "failed", error_message="Download failed before file creation")

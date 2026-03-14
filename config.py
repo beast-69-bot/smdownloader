@@ -23,6 +23,14 @@ DB_FILE      = "bot_data.db"
 MAX_RETRIES  = 3
 AUTO_INSTALL_YTDLP = True
 
+# RapidAPI Downloader (optional fallback)
+RAPIDAPI_KEY = ""  # Add key from: https://rapidapi.com/emmanueldavidyou/api/social-media-video-downloader
+RAPIDAPI_HOST = "social-media-video-downloader.p.rapidapi.com"
+RAPIDAPI_BASE_URL = f"https://{RAPIDAPI_HOST}"
+RAPIDAPI_TIMEOUT_SECONDS = 45
+RAPIDAPI_URL_ACCESS = "normal"             # "normal" or "proxied"
+RAPIDAPI_RENDERABLE_FORMATS = ""           # e.g. "720p,1080p"
+
 # Rate Limiting
 MAX_DAILY_DOWNLOADS = 20                   # Per user daily limit (0 = unlimited)
 COOLDOWN_SECONDS = 5                       # Between downloads
