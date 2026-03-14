@@ -1367,6 +1367,47 @@ async def handle_download_callback(q, data, user, context):
             )
             return
 
+    if (not filepath or not Path(filepath).exists()) and (not audio_only) and rapidapi_enabled():
+        ra_info, ra_formats = await loop.run_in_executor(None, rapidapi_info, url, platform)
+        if ra_formats:
+            requested_height = 0
+            requested_quality = ""
+            if selected_format:
+                requested_height = int(selected_format.get("height") or 0)
+                requested_quality = str(selected_format.get("quality") or "").strip().lower()
+            if not requested_height and height_limit:
+                requested_height = int(height_limit)
+
+            chosen = None
+            if requested_height:
+                exact = [fmt for fmt in ra_formats if int(fmt.get("height") or 0) == requested_height]
+                if exact:
+                    chosen = exact[0]
+            if not chosen and requested_quality:
+                for fmt in ra_formats:
+                    if requested_quality in str(fmt.get("quality") or "").strip().lower():
+                        chosen = fmt
+                        break
+            if not chosen:
+                chosen = ra_formats[0]
+
+            rapid_url = str((chosen or {}).get("direct_url") or "").strip()
+            if rapid_url:
+                rapid_ext = str((chosen or {}).get("ext") or "mp4").split("?")[0].strip(".").lower()
+                if not rapid_ext or len(rapid_ext) > 5:
+                    rapid_ext = "mp4"
+                rapid_path = str(Path(config.DOWNLOAD_DIR) / f"{int(time.time())}_{url_hash}_ra.{rapid_ext}")
+                filepath = await download_file(
+                    rapid_url,
+                    rapid_path,
+                    headers=rapidapi_download_headers(rapid_url),
+                    timeout_seconds=180,
+                )
+                if filepath and Path(filepath).exists():
+                    dl_info = ra_info or info
+                    if chosen.get("quality"):
+                        quality_label = chosen["quality"]
+
     if not filepath or not Path(filepath).exists():
         update_download_status(download_id, "failed", error_message="Download failed before file creation")
         await context.bot.send_message(
