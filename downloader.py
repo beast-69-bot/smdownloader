@@ -635,9 +635,11 @@ def ytdlp_download(url, fmt_id=None, audio_only=False, height_limit=None, platfo
 async def download_file(url, save_path, headers=None, timeout_seconds=60):
     try:
         async with aiohttp.ClientSession() as session:
+            parsed_host = urllib.parse.urlparse(url).netloc.lower()
+            request_headers = headers or {}
             async with session.get(
                 url,
-                headers=headers or {},
+                headers=request_headers,
                 timeout=aiohttp.ClientTimeout(total=timeout_seconds),
             ) as resp:
                 if 200 <= resp.status < 300:
@@ -645,6 +647,26 @@ async def download_file(url, save_path, headers=None, timeout_seconds=60):
                         async for chunk in resp.content.iter_chunked(1024 * 64):
                             await file_handle.write(chunk)
                     return save_path
+
+                # Some SMVD tunnel URLs are tokenized and reject extra headers with 403.
+                # Retry once without headers on that specific host.
+                if resp.status == 403 and request_headers and parsed_host in {"api-v3.smdw.xyz", "api.smdw.xyz"}:
+                    logger.warning("Retrying direct download without headers for %s after 403", parsed_host)
+                    async with session.get(
+                        url,
+                        headers={},
+                        timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+                    ) as retry_resp:
+                        if 200 <= retry_resp.status < 300:
+                            async with aiofiles.open(save_path, "wb") as file_handle:
+                                async for chunk in retry_resp.content.iter_chunked(1024 * 64):
+                                    await file_handle.write(chunk)
+                            return save_path
+                        logger.warning(
+                            "Direct download retry without headers got HTTP %s for %s",
+                            retry_resp.status,
+                            url,
+                        )
                 logger.warning("Direct download got HTTP %s for %s", resp.status, url)
     except Exception as e:
         logger.error(f"Direct download error: {e}")
